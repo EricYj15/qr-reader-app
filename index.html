@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Leitor de QR Code - Estações</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f4f4f4; margin: 0; padding: 0; }
+    .container { max-width: 400px; margin: 40px auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px #0001; padding: 24px; }
+    h1 { font-size: 1.4em; text-align: center; }
+    #reader { width: 100%; margin: 16px 0; }
+    ul { list-style: none; padding: 0; }
+    li { background: #e3f7e3; margin: 6px 0; padding: 8px 12px; border-radius: 4px; font-size: 1.1em; }
+    .clear-btn { background: #e74c3c; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-top: 12px; width: 100%; }
+    .clear-btn:hover { background: #c0392b; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Leitor de QR Code - Estações</h1>
+    <div id="reader"></div>
+    <div id="camera-error" style="display:none; color:#c0392b; text-align:center; margin:12px 0;"></div>
+    <button id="retry-btn" style="display:none; background:#2980b9; color:#fff; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; width:100%; margin-bottom:10px;" onclick="startScanner()">Tentar novamente acessar câmera</button>
+    <div style="font-size:0.95em; color:#555; margin-bottom:10px; text-align:center;">Se estiver no celular, use o Chrome ou Safari e permita o acesso à câmera. Em alguns casos, só funciona via HTTPS.</div>
+    <ul id="station-list"></ul>
+  </div>
+  <audio id="beep" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" preload="auto"></audio>
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <script>
+    const stationList = [];
+    const listElement = document.getElementById('station-list');
+    const beep = document.getElementById('beep');
+
+    function renderList() {
+      listElement.innerHTML = '';
+      stationList.forEach(code => {
+        const li = document.createElement('li');
+        li.textContent = code;
+        listElement.appendChild(li);
+      });
+    }
+
+    function onScanSuccess(decodedText) {
+      if (!stationList.includes(decodedText)) {
+        stationList.push(decodedText);
+        renderList();
+        beep.currentTime = 0;
+        beep.play();
+      }
+    }
+
+
+
+    let html5QrCode;
+    function startScanner() {
+      document.getElementById('camera-error').style.display = 'none';
+      document.getElementById('retry-btn').style.display = 'none';
+      document.getElementById('reader').innerHTML = '';
+      if (html5QrCode) {
+        html5QrCode.stop().catch(()=>{});
+      }
+      html5QrCode = new Html5Qrcode("reader");
+      // Sempre tenta usar a câmera traseira (environment) para mobile
+      const config = { fps: 10, qrbox: 250, facingMode: { exact: "environment" } };
+      html5QrCode.start(
+        { facingMode: "environment" },
+        config,
+        onScanSuccess
+      ).catch(err => {
+        // Se falhar, tenta a primeira câmera disponível
+        Html5Qrcode.getCameras().then(cameras => {
+          if (cameras && cameras.length) {
+            html5QrCode.start(
+              cameras[0].id,
+              { fps: 10, qrbox: 250 },
+              onScanSuccess
+            ).catch(err2 => {
+              document.getElementById('reader').innerHTML = '';
+              document.getElementById('camera-error').style.display = 'block';
+              document.getElementById('camera-error').innerText = 'Erro ao acessar a câmera.\nPermita o acesso e tente novamente.';
+              document.getElementById('retry-btn').style.display = 'block';
+            });
+          } else {
+            document.getElementById('reader').innerHTML = 'Nenhuma câmera encontrada.';
+          }
+        }).catch(() => {
+          document.getElementById('reader').innerHTML = '';
+          document.getElementById('camera-error').style.display = 'block';
+          document.getElementById('camera-error').innerText = 'Erro ao acessar a câmera.\nPermita o acesso e tente novamente.';
+          document.getElementById('retry-btn').style.display = 'block';
+        });
+      });
+    }
+    // Inicia ao carregar
+    startScanner();
+  </script>
+</body>
+</html>

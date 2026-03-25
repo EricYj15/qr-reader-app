@@ -1,0 +1,12 @@
+{
+  "name": "qr-reader-app",
+  "version": "1.0.0",
+  "description": "App simples para ler QR Code de estações e registrar em lista.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
