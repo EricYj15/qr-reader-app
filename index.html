@@ -12,23 +12,36 @@
     ul { list-style: none; padding: 0; }
     li { background: #e3f7e3; margin: 6px 0; padding: 8px 12px; border-radius: 4px; font-size: 1.1em; transition: background 0.2s; }
     .duplicate { background: #ffe066 !important; color: #222 !important; }
+    .new-scan { background: #b6f0b6 !important; box-shadow: 0 0 0 2px #4caf50 inset; }
     .copy-btn { background: #4cafef; color: #111; border: none; padding: 10px 0; border-radius: 6px; font-weight: 600; cursor: pointer; width: 100%; margin-top: 10px; }
     .clear-btn { background: #e74c3c; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-top: 12px; width: 100%; }
     .clear-btn:hover { background: #c0392b; }
+    /* Botão da lanterna (flash) */
+    .torch-btn { display: none; background: #f39c12; color: #111; border: none; padding: 12px 0; border-radius: 6px; font-weight: 700; cursor: pointer; width: 100%; margin: 4px 0 10px; font-size: 1.05em; }
+    .torch-btn.torch-on { background: #f1c40f; box-shadow: 0 0 0 3px #e67e22 inset; }
+    /* Caixa com o último QR lido, logo abaixo da câmera */
+    #last-read { display: none; margin: 4px 0 12px; padding: 12px 14px; border-radius: 6px; background: #e3f7e3; border: 1px solid #b6e2b6; font-size: 1.05em; word-break: break-all; text-align: center; animation: pop 0.18s ease; }
+    #last-read.dup { background: #ffe066; border-color: #e6c200; color: #222; }
+    #last-read .lr-label { display: block; font-size: 0.75em; color: #2e7d32; font-weight: 700; margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.04em; }
+    #last-read.dup .lr-label { color: #8a6d00; }
+    #last-read .lr-code { font-weight: 600; font-family: monospace; }
+    @keyframes pop { from { transform: scale(0.96); opacity: 0.4; } to { transform: scale(1); opacity: 1; } }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>Leitor de QR Code - Estações</h1>
     <div id="reader"></div>
+    <button id="btn-torch" class="torch-btn">🔦 Ligar lanterna</button>
+    <div id="last-read"></div>
     <div id="camera-error" style="display:none; color:#c0392b; text-align:center; margin:12px 0;"></div>
     <button id="retry-btn" style="display:none; background:#2980b9; color:#fff; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; width:100%; margin-bottom:10px;" onclick="startScanner()">Tentar novamente acessar câmera</button>
-    <div style="font-size:0.95em; color:#555; margin-bottom:10px; text-align:center;">Se estiver no celular, use o Chrome ou Safari e permita o acesso à câmera. Em alguns casos, só funciona via HTTPS.</div>
+    <div style="font-size:0.95em; color:#555; margin-bottom:10px; text-align:center;">Se estiver no celular, use o Chrome ou Safari e permita o acesso à câmera. Em alguns casos, só funciona via HTTPS. A lanterna só aparece em aparelhos compatíveis (Android).</div>
     <ul id="station-list"></ul>
     <button id="btn-copy" class="copy-btn">Copiar códigos</button>
   </div>
   <audio id="beep" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" preload="auto"></audio>
-  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8" type="text/javascript"></script>
   <script>
 
     // Persistência local
@@ -36,7 +49,6 @@
     let stationList = [];
     const listElement = document.getElementById('station-list');
     const beep = document.getElementById('beep');
-    let lastDuplicate = null;
 
     function loadList() {
       try {
@@ -48,86 +60,281 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(stationList));
     }
 
-    function renderList(highlightCode) {
+    function renderList(highlightCode, highlightClass) {
       listElement.innerHTML = '';
       stationList.forEach(code => {
         const li = document.createElement('li');
         li.textContent = code;
         if (highlightCode && code === highlightCode) {
-          li.classList.add('duplicate');
+          li.classList.add(highlightClass || 'duplicate');
         }
         listElement.appendChild(li);
       });
     }
 
-    function playFeedback() {
-      beep.currentTime = 0;
-      beep.play();
-      if (navigator.vibrate) navigator.vibrate(30);
+    // ---------- Som (barulhinho) ----------
+    // Usa Web Audio API (funciona offline) e cai para o <audio> se necessário.
+    let audioCtx = null;
+    function unlockAudio() {
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+      } catch (e) {}
     }
-    function playDuplicateFeedback() {
-      if (navigator.vibrate) navigator.vibrate([50, 30, 50]);
+    // A política de autoplay exige um gesto do usuário para liberar o áudio.
+    document.addEventListener('pointerdown', unlockAudio, { passive: true });
+    document.addEventListener('touchstart', unlockAudio, { passive: true });
+
+    function playTone(freq, durationMs) {
+      if (audioCtx && audioCtx.state === 'running') {
+        try {
+          const now = audioCtx.currentTime;
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = 'square';
+          osc.frequency.value = freq;
+          gain.gain.setValueAtTime(0.0001, now);
+          gain.gain.exponentialRampToValueAtTime(0.22, now + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + durationMs / 1000);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(now);
+          osc.stop(now + durationMs / 1000 + 0.02);
+          return;
+        } catch (e) {}
+      }
+      // Fallback: elemento <audio>
+      try { beep.currentTime = 0; beep.play().catch(() => {}); } catch (e) {}
     }
 
+    // ---------- Feedback (treme + barulhinho) ----------
+    function playFeedback() {
+      playTone(880, 130);
+      if (navigator.vibrate) navigator.vibrate(60); // treme o celular
+    }
+    function playDuplicateFeedback() {
+      playTone(320, 90);
+      if (navigator.vibrate) navigator.vibrate([40, 40, 40]);
+    }
+
+    // ---------- Caixa com o último QR lido (abaixo da câmera) ----------
+    function showLastRead(code, isDuplicate) {
+      const box = document.getElementById('last-read');
+      box.classList.toggle('dup', !!isDuplicate);
+      box.innerHTML = '';
+      const label = document.createElement('span');
+      label.className = 'lr-label';
+      label.textContent = isDuplicate ? 'Já lido' : 'QR lido';
+      const codeEl = document.createElement('span');
+      codeEl.className = 'lr-code';
+      codeEl.textContent = code;
+      box.appendChild(label);
+      box.appendChild(codeEl);
+      box.style.display = 'block';
+      // reinicia a animaçãozinha de "pop"
+      box.style.animation = 'none';
+      void box.offsetWidth;
+      box.style.animation = '';
+    }
+
+    // ---------- Leitura ----------
+    // Cooldown: o QR fica em quadro por vários frames; ignoramos repetições
+    // do MESMO código dentro de uma janela curta para não vibrar/tocar sem parar.
+    let lastHandledText = null;
+    let lastHandledAt = 0;
+    const SCAN_COOLDOWN_MS = 1500;
+
     function onScanSuccess(decodedText) {
+      const now = Date.now();
+      if (decodedText === lastHandledText && (now - lastHandledAt) < SCAN_COOLDOWN_MS) {
+        return; // mesmo código repetido rápido -> ignora
+      }
+      lastHandledText = decodedText;
+      lastHandledAt = now;
+
       if (!stationList.includes(decodedText)) {
         stationList.push(decodedText);
         saveList();
-        renderList(decodedText);
+        renderList(decodedText, 'new-scan');
+        showLastRead(decodedText, false);
         playFeedback();
-        lastDuplicate = null;
+        setTimeout(() => renderList(), 800);
       } else {
         renderList(decodedText);
+        showLastRead(decodedText, true);
         playDuplicateFeedback();
-        lastDuplicate = decodedText;
         setTimeout(() => renderList(), 800);
       }
     }
 
+    // ---------- Lanterna / Flash ----------
+    let torchIsOn = false;
 
+    // Só funciona DEPOIS que start() resolveu (câmera ativa).
+    function getTorchFeature() {
+      if (!html5QrCode) return null;
+      try {
+        if (typeof html5QrCode.getRunningTrackCameraCapabilities === 'function') {
+          const caps = html5QrCode.getRunningTrackCameraCapabilities();
+          const torch = caps.torchFeature();
+          if (torch && torch.isSupported()) return torch;
+        }
+      } catch (e) {}
+      return null;
+    }
 
+    function isTorchSupported() {
+      if (getTorchFeature()) return true;
+      try {
+        if (typeof html5QrCode.getRunningTrackCapabilities === 'function') {
+          const caps = html5QrCode.getRunningTrackCapabilities();
+          if (caps && 'torch' in caps) return true;
+        }
+        if (typeof html5QrCode.getRunningTrackSettings === 'function') {
+          const settings = html5QrCode.getRunningTrackSettings();
+          if (settings && 'torch' in settings) return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+
+    function hideTorchButton() {
+      const btn = document.getElementById('btn-torch');
+      if (btn) btn.style.display = 'none';
+    }
+    function updateTorchButtonLabel() {
+      const btn = document.getElementById('btn-torch');
+      if (!btn) return;
+      btn.textContent = torchIsOn ? '🔦 Desligar lanterna' : '🔦 Ligar lanterna';
+      btn.classList.toggle('torch-on', torchIsOn);
+    }
+    // Mostra o botão só se o aparelho suportar (esconde em iPhone, câmera frontal, etc.)
+    function refreshTorchButton() {
+      const btn = document.getElementById('btn-torch');
+      if (!btn) return;
+      btn.style.display = isTorchSupported() ? 'block' : 'none';
+    }
+
+    async function torchOn() {
+      const feature = getTorchFeature();
+      if (feature) {
+        try { await feature.apply(true); return true; }
+        catch (e) { console.warn('Não foi possível ligar a lanterna:', e); return false; }
+      }
+      try {
+        await html5QrCode.applyVideoConstraints({ advanced: [{ torch: true }] });
+        // Alguns aparelhos não devolvem "torch" nas settings: se não deu erro, assume sucesso.
+        const settings = html5QrCode.getRunningTrackSettings ? html5QrCode.getRunningTrackSettings() : {};
+        return settings.torch === false ? false : true;
+      } catch (e) { console.warn('Não foi possível ligar a lanterna:', e); return false; }
+    }
+    async function torchOff() {
+      const feature = getTorchFeature();
+      if (feature) {
+        try { await feature.apply(false); return true; }
+        catch (e) { console.warn('Não foi possível desligar a lanterna:', e); return false; }
+      }
+      try {
+        await html5QrCode.applyVideoConstraints({ advanced: [{ torch: false }] });
+        const settings = html5QrCode.getRunningTrackSettings ? html5QrCode.getRunningTrackSettings() : {};
+        return settings.torch === true ? false : true;
+      } catch (e) { console.warn('Não foi possível desligar a lanterna:', e); return false; }
+    }
+
+    document.getElementById('btn-torch').onclick = async function () {
+      const ok = torchIsOn ? await torchOff() : await torchOn();
+      if (ok) {
+        torchIsOn = !torchIsOn;
+        updateTorchButtonLabel();
+      }
+    };
+
+    // ---------- Scanner ----------
     let html5QrCode;
-    function startScanner() {
+
+    // formatsToSupport + BarcodeDetector vão no CONSTRUTOR (leitura mais rápida).
+    function buildQrInstance() {
+      const constructorConfig = {
+        verbose: false,
+        useBarCodeDetectorIfSupported: true,
+        experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+      };
+      if (typeof Html5QrcodeSupportedFormats !== 'undefined' &&
+          typeof Html5QrcodeSupportedFormats.QR_CODE !== 'undefined') {
+        constructorConfig.formatsToSupport = [Html5QrcodeSupportedFormats.QR_CODE];
+      }
+      return new Html5Qrcode('reader', constructorConfig);
+    }
+
+    // fps/qrbox/disableFlip vão no start() (leitura mais rápida).
+    function buildScanConfig() {
+      return {
+        fps: 25,
+        qrbox: function (vw, vh) {
+          const minEdge = Math.min(vw, vh);
+          const size = Math.max(200, Math.floor(minEdge * 0.7));
+          return { width: size, height: size };
+        },
+        disableFlip: true
+      };
+    }
+
+    function showCameraError(msg) {
+      document.getElementById('reader').innerHTML = '';
+      const el = document.getElementById('camera-error');
+      el.style.color = '#c0392b';
+      el.style.display = 'block';
+      el.innerText = msg;
+      document.getElementById('retry-btn').style.display = 'block';
+    }
+
+    async function startScanner() {
       document.getElementById('camera-error').style.display = 'none';
       document.getElementById('retry-btn').style.display = 'none';
       document.getElementById('reader').innerHTML = '';
-      if (html5QrCode) {
-        html5QrCode.stop().catch(()=>{});
+
+      // Se a biblioteca (CDN) não carregou, mostra erro amigável.
+      if (typeof Html5Qrcode === 'undefined') {
+        hideTorchButton();
+        showCameraError('Não foi possível carregar o leitor de QR.\nVerifique sua conexão e tente novamente.');
+        return;
       }
-      html5QrCode = new Html5Qrcode("reader");
-      // Sempre tenta usar a câmera traseira (environment) para mobile
-      const config = { fps: 10, qrbox: 250, facingMode: { exact: "environment" } };
-      html5QrCode.start(
-        { facingMode: "environment" },
-        config,
-        onScanSuccess
-      ).catch(err => {
-        // Se falhar, tenta a primeira câmera disponível
-        Html5Qrcode.getCameras().then(cameras => {
+
+      // Nova câmera/track: lanterna volta pro estado desligado.
+      torchIsOn = false;
+      updateTorchButtonLabel();
+      hideTorchButton();
+
+      if (html5QrCode) {
+        try { await html5QrCode.stop(); } catch (e) {}
+      }
+      html5QrCode = buildQrInstance();
+      const scanConfig = buildScanConfig();
+
+      try {
+        // Câmera traseira (environment) para mobile. O seletor é o 1º argumento.
+        await html5QrCode.start({ facingMode: 'environment' }, scanConfig, onScanSuccess);
+        refreshTorchButton();
+      } catch (err) {
+        // Se falhar, tenta a primeira câmera disponível.
+        try {
+          const cameras = await Html5Qrcode.getCameras();
           if (cameras && cameras.length) {
-            html5QrCode.start(
-              cameras[0].id,
-              { fps: 10, qrbox: 250 },
-              onScanSuccess
-            ).catch(err2 => {
-              document.getElementById('reader').innerHTML = '';
-              document.getElementById('camera-error').style.display = 'block';
-              document.getElementById('camera-error').innerText = 'Erro ao acessar a câmera.\nPermita o acesso e tente novamente.';
-              document.getElementById('retry-btn').style.display = 'block';
-            });
+            await html5QrCode.start(cameras[0].id, scanConfig, onScanSuccess);
+            refreshTorchButton();
           } else {
-            document.getElementById('reader').innerHTML = 'Nenhuma câmera encontrada.';
+            hideTorchButton();
+            showCameraError('Nenhuma câmera encontrada.');
           }
-        }).catch(() => {
-          document.getElementById('reader').innerHTML = '';
-          document.getElementById('camera-error').style.display = 'block';
-          document.getElementById('camera-error').innerText = 'Erro ao acessar a câmera.\nPermita o acesso e tente novamente.';
-          document.getElementById('retry-btn').style.display = 'block';
-        });
-      });
+        } catch (err2) {
+          hideTorchButton();
+          showCameraError('Erro ao acessar a câmera.\nPermita o acesso e tente novamente.');
+        }
+      }
     }
+
     // Botão copiar códigos
-    document.getElementById('btn-copy').onclick = function() {
+    document.getElementById('btn-copy').onclick = function () {
       if (!stationList.length) return alert('Nenhum código para copiar!');
       const text = stationList.join('\n');
       navigator.clipboard.writeText(text).then(() => {
