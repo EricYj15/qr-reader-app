@@ -16,6 +16,11 @@
     .copy-btn { background: #4cafef; color: #111; border: none; padding: 10px 0; border-radius: 6px; font-weight: 600; cursor: pointer; width: 100%; margin-top: 10px; }
     .clear-btn { background: #e74c3c; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-top: 12px; width: 100%; }
     .clear-btn:hover { background: #c0392b; }
+    /* Botão para liberar som/vibração (exigido pelos celulares) */
+    .enable-btn { display: block; width: 100%; background: #2ecc71; color: #06371d; border: none; padding: 13px 0; border-radius: 6px; font-weight: 700; cursor: pointer; margin: 4px 0 10px; font-size: 1.05em; }
+    .enable-btn.enabled { background: #27ae60; color: #fff; }
+    .enable-btn.nudge { animation: shake 0.4s ease; }
+    @keyframes shake { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
     /* Botão da lanterna (flash) */
     .torch-btn { display: none; background: #f39c12; color: #111; border: none; padding: 12px 0; border-radius: 6px; font-weight: 700; cursor: pointer; width: 100%; margin: 4px 0 10px; font-size: 1.05em; }
     .torch-btn.torch-on { background: #f1c40f; box-shadow: 0 0 0 3px #e67e22 inset; }
@@ -32,6 +37,7 @@
   <div class="container">
     <h1>Leitor de QR Code - Estações</h1>
     <div id="reader"></div>
+    <button id="btn-enable" class="enable-btn">🔔 Ativar som e vibração</button>
     <button id="btn-torch" class="torch-btn">🔦 Ligar lanterna</button>
     <div id="last-read"></div>
     <div id="camera-error" style="display:none; color:#c0392b; text-align:center; margin:12px 0;"></div>
@@ -72,36 +78,54 @@
       });
     }
 
-    // ---------- Som (barulhinho) ----------
-    // Usa Web Audio API (funciona offline) e cai para o <audio> se necessário.
+    // ---------- Som (barulhinho) e liberação de áudio/vibração ----------
+    // IMPORTANTE: navegadores de celular só deixam TOCAR SOM e VIBRAR depois
+    // de um toque do usuário na página (política de "user activation"). Por isso
+    // existe o botão "Ativar som e vibração" e liberamos em qualquer toque.
     let audioCtx = null;
-    function unlockAudio() {
+    let feedbackReady = false;
+    const canVibrate = typeof navigator.vibrate === 'function';
+
+    function enableFeedback() {
       try {
         if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+        // iPhone: tocar um buffer silencioso DENTRO do gesto destrava o áudio.
+        if (audioCtx) {
+          const buf = audioCtx.createBuffer(1, 1, 22050);
+          const src = audioCtx.createBufferSource();
+          src.buffer = buf;
+          src.connect(audioCtx.destination);
+          src.start(0);
+        }
       } catch (e) {}
+      feedbackReady = true;
     }
-    // A política de autoplay exige um gesto do usuário para liberar o áudio.
-    document.addEventListener('pointerdown', unlockAudio, { passive: true });
-    document.addEventListener('touchstart', unlockAudio, { passive: true });
+
+    // Qualquer toque na página libera o áudio/vibração (rede de segurança).
+    document.addEventListener('pointerdown', enableFeedback, { passive: true });
+    document.addEventListener('touchstart', enableFeedback, { passive: true });
 
     function playTone(freq, durationMs) {
-      if (audioCtx && audioCtx.state === 'running') {
-        try {
-          const now = audioCtx.currentTime;
-          const osc = audioCtx.createOscillator();
-          const gain = audioCtx.createGain();
-          osc.type = 'square';
-          osc.frequency.value = freq;
-          gain.gain.setValueAtTime(0.0001, now);
-          gain.gain.exponentialRampToValueAtTime(0.22, now + 0.01);
-          gain.gain.exponentialRampToValueAtTime(0.0001, now + durationMs / 1000);
-          osc.connect(gain);
-          gain.connect(audioCtx.destination);
-          osc.start(now);
-          osc.stop(now + durationMs / 1000 + 0.02);
-          return;
-        } catch (e) {}
+      if (audioCtx) {
+        if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+        if (audioCtx.state === 'running') {
+          try {
+            const now = audioCtx.currentTime;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'square';
+            osc.frequency.value = freq;
+            gain.gain.setValueAtTime(0.0001, now);
+            gain.gain.exponentialRampToValueAtTime(0.25, now + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + durationMs / 1000);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(now);
+            osc.stop(now + durationMs / 1000 + 0.02);
+            return;
+          } catch (e) {}
+        }
       }
       // Fallback: elemento <audio>
       try { beep.currentTime = 0; beep.play().catch(() => {}); } catch (e) {}
@@ -151,6 +175,8 @@
       }
       lastHandledText = decodedText;
       lastHandledAt = now;
+
+      if (!feedbackReady) nudgeEnableButton();
 
       if (!stationList.includes(decodedText)) {
         stationList.push(decodedText);
@@ -331,6 +357,31 @@
           showCameraError('Erro ao acessar a câmera.\nPermita o acesso e tente novamente.');
         }
       }
+    }
+
+    // Botão "Ativar som e vibração" (necessário nos celulares)
+    (function initEnableButton() {
+      const b = document.getElementById('btn-enable');
+      if (!b) return;
+      b.textContent = canVibrate ? '🔔 Ativar som e vibração' : '🔔 Ativar som';
+      b.onclick = function () {
+        enableFeedback();
+        // teste imediato pra confirmar que funciona
+        playTone(880, 150);
+        if (canVibrate) navigator.vibrate(80);
+        b.textContent = canVibrate ? '✅ Som e vibração ativados' : '✅ Som ativado';
+        b.classList.add('enabled');
+        setTimeout(() => { b.style.display = 'none'; }, 1600);
+      };
+    })();
+
+    // Se ler um QR antes de ativar, chama atenção pro botão.
+    function nudgeEnableButton() {
+      const b = document.getElementById('btn-enable');
+      if (!b || feedbackReady || b.style.display === 'none') return;
+      b.classList.remove('nudge');
+      void b.offsetWidth;
+      b.classList.add('nudge');
     }
 
     // Botão copiar códigos
